@@ -19,6 +19,13 @@ out/
 # Local domain data store (interim JSON persistence)
 .data/
 
+# Compact contract artifacts (binary — generated, not committed)
+contract/dist/managed/
+contract/dist/*.js
+contract/dist/*.js.map
+contract/dist/*.d.ts
+contract/dist/*.compact
+
 # Internal docs (session notes, handover, roadmap — not for public repo)
 docs/
 

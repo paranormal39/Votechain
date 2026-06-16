@@ -1,5 +1,11 @@
 import 'server-only';
 import { AgilityClient, AgilityError } from '../agility/client';
+import {
+  onChainCreateProposal,
+  onChainCheckProposalResult,
+  onChainCreateTreasuryProposal,
+  onChainGenerateTreasuryAudit,
+} from '../midnight/client';
 import { orgRepository, OrgNotFoundError, type OrgRepository } from './repository';
 import {
   proposalRepository,
@@ -89,13 +95,35 @@ export class ProposalService {
       }
     }
 
-    return this.proposals.update(id, (p) => ({
+    const updated = await this.proposals.update(id, (p) => ({
       ...p,
       status: 'active',
       activatedAt: now.toISOString(),
       votingEndsAt: endsAt.toISOString(),
       agilityProposalId: agilityProposalId ?? p.agilityProposalId,
     }));
+
+    // Best-effort: create on-chain proposal in the Voting (or Treasury) contract.
+    const onChainId = BigInt(Date.now());
+    const metaHash = new Uint8Array(32);
+    const idBytes = Buffer.from(updated.id);
+    metaHash.set(idBytes.subarray(0, Math.min(32, idBytes.length)));
+    const commitBlocks = BigInt(proposal.votingPeriodDays * 720); // ~1 block/2min
+    const revealBlocks = 50n;
+    try {
+      if (proposal.type === 'treasury') {
+        await onChainCreateTreasuryProposal(
+          onChainId, metaHash, new Uint8Array(32), commitBlocks, revealBlocks, proposal.quorum
+        );
+      } else {
+        await onChainCreateProposal(onChainId, metaHash, commitBlocks, revealBlocks, proposal.quorum);
+      }
+      await this.proposals.update(id, (p) => ({ ...p, onChainProposalId: Number(onChainId) }));
+    } catch (err) {
+      this.warn('onChainCreateProposal', id, err);
+    }
+
+    return updated;
   }
 
   async finalizeProposal(id: string): Promise<Proposal> {
@@ -112,6 +140,25 @@ export class ProposalService {
       status: outcome,
       finalizedAt: new Date().toISOString(),
     }));
+
+    // Best-effort: finalize on-chain.
+    if (proposal.onChainProposalId != null) {
+      try {
+        await onChainCheckProposalResult(BigInt(proposal.onChainProposalId));
+      } catch (err) {
+        this.warn('onChainCheckProposalResult', id, err);
+      }
+    }
+
+    // Best-effort: generate audit receipt for passed treasury proposals.
+    if (outcome === 'passed' && proposal.type === 'treasury' && proposal.onChainProposalId != null) {
+      try {
+        const receipt = await onChainGenerateTreasuryAudit(BigInt(proposal.onChainProposalId));
+        await this.proposals.update(id, (p) => ({ ...p, auditReceipt: receipt }));
+      } catch (err) {
+        this.warn('onChainGenerateTreasuryAudit', id, err);
+      }
+    }
 
     // Treasury governance gate: auto-approve linked spend requests when proposal passes.
     if (outcome === 'passed' && proposal.type === 'treasury') {

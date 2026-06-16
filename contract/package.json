@@ -1,0 +1,33 @@
+{
+  "name": "@midnight-ntwrk/dao-contract",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "compact": "compact compile src/dao.compact src/managed/dao",
+    "compact:dao": "compact compile src/votechain/1-dao.compact src/managed/votechain-dao",
+    "compact:voting": "compact compile src/votechain/2-voting.compact src/managed/votechain-voting",
+    "compact:delegation": "compact compile src/votechain/3-delegation.compact src/managed/votechain-delegation",
+    "compact:treasury": "compact compile src/votechain/4-treasury.compact src/managed/votechain-treasury",
+    "compact:feedback": "compact compile src/votechain/5-feedback.compact src/managed/votechain-feedback",
+    "compact:all": "npm run compact:dao && npm run compact:voting && npm run compact:delegation && npm run compact:treasury && npm run compact:feedback",
+    "test": "vitest run",
+    "test:compile": "npm run compact && vitest run",
+    "test:compile:all": "npm run compact:all && vitest run",
+    "build": "rm -rf dist && npx --no-install tsc --project tsconfig.build.json && cp -Rf ./src/managed ./dist/managed && cp ./src/dao.compact ./dist",
+    "lint": "eslint src",
+    "typecheck": "npx --no-install tsc -p tsconfig.json --noEmit"
+  }
+}

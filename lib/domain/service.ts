@@ -1,5 +1,7 @@
 import 'server-only';
+import { createHash } from 'crypto';
 import { AgilityClient, AgilityError } from '../agility/client';
+import { onChainAddEligibleVoter } from '../midnight/client';
 import { verifyRequirements } from '../membership/verify';
 import type { RequirementResult } from '../membership/types';
 import { orgRepository, OrgNotFoundError, type OrgRepository } from './repository';
@@ -120,6 +122,15 @@ export class OrgService {
         const reason = err instanceof AgilityError ? `${err.status} ${err.message}` : String(err);
         console.warn(`[OrgService] followDao deferred for "${orgId}": ${reason}`);
       }
+    }
+
+    // Best-effort: add member as eligible voter in the on-chain DAO contract.
+    // Voter secret is deterministically derived from their wallet address (SHA-256 truncated to 32 bytes).
+    try {
+      const voterSecret = createHash('sha256').update(input.walletAddress).digest('hex');
+      await onChainAddEligibleVoter(voterSecret);
+    } catch (err) {
+      console.warn(`[OrgService] onChainAddEligibleVoter deferred for "${input.walletAddress}": ${String(err)}`);
     }
 
     return org;

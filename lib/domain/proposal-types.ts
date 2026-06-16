@@ -66,6 +66,10 @@ export interface Proposal {
   finalizedAt?: string;
   /** Backing AgilityCore proposal id, provisioned on activation. */
   agilityProposalId?: string;
+  /** Numeric id used in the on-chain Voting contract (Phase 6). */
+  onChainProposalId?: number;
+  /** Audit receipt from generate_treasury_audit circuit (Phase 6). */
+  auditReceipt?: string;
   /** Vote tally — updated on every cast vote. */
   tally: VoteTally;
   /** Full vote log — choice is 'private' for ZK votes (actual choice never stored). */
