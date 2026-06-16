@@ -1,0 +1,230 @@
+import 'server-only';
+import { AgilityClient, AgilityError } from '../agility/client';
+import { orgRepository, OrgNotFoundError, type OrgRepository } from './repository';
+import {
+  proposalRepository,
+  ProposalNotFoundError,
+  type ProposalRepository,
+} from './proposal-repository';
+import { delegationService, type DelegationService } from './delegation-service';
+import { treasuryService, type TreasuryService } from './treasury-service';
+import {
+  resolveOutcome,
+  type AddCommentInput,
+  type CastPrivateVoteInput,
+  type CastPublicVoteInput,
+  type CreateProposalInput,
+  type Proposal,
+} from './proposal-types';
+
+export class ProposalStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProposalStateError';
+  }
+}
+
+/**
+ * Proposal service: orchestrates the VoteChain proposal store and AgilityCore.
+ *
+ * Lifecycle: draft → active → passed/failed.
+ * - create: stored locally as `draft`.
+ * - activate: opens the voting window and best-effort provisions a backing
+ *   AgilityCore proposal (needs the org's daoId) so Phase 3 voting has a target.
+ * - finalize: resolves the outcome against the quorum (Phase 3 populates tally).
+ * - comment: appended locally and best-effort mirrored to AgilityCore.
+ *
+ * AgilityCore failures are non-fatal — the VoteChain record remains the source
+ * of truth, mirroring the org/DAO pattern from Phase 1.
+ */
+export class ProposalService {
+  constructor(
+    private readonly proposals: ProposalRepository = proposalRepository,
+    private readonly orgs: OrgRepository = orgRepository,
+    private readonly agility: AgilityClient = new AgilityClient(),
+    private readonly delegations: DelegationService = delegationService,
+    private readonly treasury: TreasuryService = treasuryService
+  ) {}
+
+  listByOrg(orgId: string): Promise<Proposal[]> {
+    return this.proposals.listByOrg(orgId);
+  }
+
+  getProposal(id: string): Promise<Proposal | null> {
+    return this.proposals.getProposal(id);
+  }
+
+  async createProposal(input: CreateProposalInput): Promise<Proposal> {
+    const org = await this.orgs.getOrganization(input.orgId);
+    if (!org) throw new OrgNotFoundError(input.orgId);
+    return this.proposals.createProposal(input);
+  }
+
+  async activateProposal(id: string): Promise<Proposal> {
+    const proposal = await this.requireProposal(id);
+    if (proposal.status !== 'draft') {
+      throw new ProposalStateError(
+        `Only draft proposals can be activated (current: ${proposal.status})`
+      );
+    }
+
+    const now = new Date();
+    const endsAt = new Date(now.getTime() + proposal.votingPeriodDays * 24 * 60 * 60 * 1000);
+
+    // Best-effort: provision the backing AgilityCore proposal.
+    let agilityProposalId: string | undefined;
+    const org = await this.orgs.getOrganization(proposal.orgId);
+    if (org?.daoId) {
+      try {
+        const res = await this.agility.createProposal({
+          daoId: org.daoId,
+          title: proposal.title,
+          description: proposal.description,
+          chain: org.chain,
+          status: 'active',
+        });
+        agilityProposalId = res.data?.id;
+      } catch (err) {
+        this.warn('createProposal', proposal.id, err);
+      }
+    }
+
+    return this.proposals.update(id, (p) => ({
+      ...p,
+      status: 'active',
+      activatedAt: now.toISOString(),
+      votingEndsAt: endsAt.toISOString(),
+      agilityProposalId: agilityProposalId ?? p.agilityProposalId,
+    }));
+  }
+
+  async finalizeProposal(id: string): Promise<Proposal> {
+    const proposal = await this.requireProposal(id);
+    if (proposal.status !== 'active') {
+      throw new ProposalStateError(
+        `Only active proposals can be finalized (current: ${proposal.status})`
+      );
+    }
+
+    const outcome = resolveOutcome(proposal);
+    const finalized = await this.proposals.update(id, (p) => ({
+      ...p,
+      status: outcome,
+      finalizedAt: new Date().toISOString(),
+    }));
+
+    // Treasury governance gate: auto-approve linked spend requests when proposal passes.
+    if (outcome === 'passed' && proposal.type === 'treasury') {
+      try {
+        const account = await this.treasury.getOrInit(proposal.orgId);
+        for (const sr of account.spendRequests) {
+          if (sr.proposalId === id && sr.status === 'pending') {
+            await this.treasury.approveSpendRequest(proposal.orgId, sr.id);
+          }
+        }
+      } catch {
+        /* non-fatal — treasury may not exist yet */
+      }
+    }
+
+    return finalized;
+  }
+
+  async castVote(id: string, input: CastPublicVoteInput): Promise<Proposal> {
+    const proposal = await this.requireProposal(id);
+    if (proposal.status !== 'active') {
+      throw new ProposalStateError(`Voting is only open on active proposals (current: ${proposal.status})`);
+    }
+    const alreadyVoted = await this.proposals.hasVoted(id, input.walletAddress);
+    if (alreadyVoted) {
+      throw new ProposalStateError('You have already voted on this proposal');
+    }
+
+    // Resolve delegation weight (own vote + any active delegations to this wallet).
+    const weight = await this.delegations
+      .resolveVoteWeight(proposal.orgId, input.walletAddress)
+      .catch(() => 1);
+
+    let receipt: string | undefined;
+    if (proposal.agilityProposalId) {
+      try {
+        const method =
+          input.choice === 'yes'
+            ? this.agility.voteYes.bind(this.agility)
+            : input.choice === 'no'
+              ? this.agility.voteNo.bind(this.agility)
+              : this.agility.voteAbstain.bind(this.agility);
+        const res = await method({ proposalId: proposal.agilityProposalId, walletAddress: input.walletAddress });
+        receipt = res.data?.txHash;
+      } catch (err) {
+        this.warn('castVote', id, err);
+      }
+    }
+
+    return this.proposals.addVote(id, input, receipt, weight);
+  }
+
+  async castPrivateVote(id: string, input: CastPrivateVoteInput): Promise<Proposal> {
+    const proposal = await this.requireProposal(id);
+    if (proposal.status !== 'active') {
+      throw new ProposalStateError(`Voting is only open on active proposals (current: ${proposal.status})`);
+    }
+    const alreadyVoted = await this.proposals.hasVoted(id, input.walletAddress);
+    if (alreadyVoted) {
+      throw new ProposalStateError('You have already voted on this proposal');
+    }
+
+    const weight = await this.delegations
+      .resolveVoteWeight(proposal.orgId, input.walletAddress)
+      .catch(() => 1);
+
+    let receipt: string | undefined;
+    if (proposal.agilityProposalId) {
+      try {
+        const res = await this.agility.votePrivate({
+          proposalId: proposal.agilityProposalId,
+          walletAddress: input.walletAddress,
+          proofHash: input.proofHash,
+        });
+        receipt = res.data?.txHash;
+      } catch (err) {
+        this.warn('castPrivateVote', id, err);
+      }
+    }
+
+    return this.proposals.addPrivateVote(id, input, receipt, weight);
+  }
+
+  async comment(id: string, input: AddCommentInput): Promise<Proposal> {
+    const proposal = await this.requireProposal(id);
+
+    let agilityCommentId: string | undefined;
+    if (proposal.agilityProposalId) {
+      try {
+        const res = await this.agility.commentProposal({
+          proposalId: proposal.agilityProposalId,
+          walletAddress: input.author,
+          comment: input.body,
+        });
+        agilityCommentId = res.data?.id;
+      } catch (err) {
+        this.warn('commentProposal', proposal.id, err);
+      }
+    }
+
+    return this.proposals.addComment(id, input, agilityCommentId);
+  }
+
+  private async requireProposal(id: string): Promise<Proposal> {
+    const proposal = await this.proposals.getProposal(id);
+    if (!proposal) throw new ProposalNotFoundError(id);
+    return proposal;
+  }
+
+  private warn(op: string, id: string, err: unknown): void {
+    const reason = err instanceof AgilityError ? `${err.status} ${err.message}` : String(err);
+    console.warn(`[ProposalService] ${op} deferred for "${id}": ${reason}`);
+  }
+}
+
+export const proposalService = new ProposalService();
