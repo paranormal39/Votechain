@@ -17,6 +17,9 @@ import {
   SpendRequestNotFoundError,
 } from '../domain/treasury-repository';
 import { TreasuryError } from '../domain/treasury-service';
+import { FeedbackError } from '../domain/feedback-service';
+import { ProjectNotFoundError } from '../launchpad/project-repository';
+import { ProjectStateError } from '../launchpad/project-service';
 
 export function ok<T>(data: T, status = 200) {
   return NextResponse.json({ success: true, data }, { status });
@@ -93,6 +96,15 @@ export function handleError(err: unknown): NextResponse {
   }
   if (err instanceof TreasuryError) {
     return fail(err.message, 422, 'TREASURY_ERROR');
+  }
+  if (err instanceof FeedbackError) {
+    return fail(err.message, 422, 'FEEDBACK_ERROR');
+  }
+  if (err instanceof ProjectNotFoundError) {
+    return fail(err.message, 404, 'PROJECT_NOT_FOUND');
+  }
+  if (err instanceof ProjectStateError) {
+    return fail(err.message, 409, 'PROJECT_STATE');
   }
   if (err instanceof AgilityError) {
     return fail(err.message, err.status >= 400 ? err.status : 502, err.code, err.details);

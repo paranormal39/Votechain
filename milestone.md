@@ -6,6 +6,54 @@ This document tracks completed milestones and project progress. It always repres
 
 ---
 
+## 2026-06-21 — Phase B · Discord Bot (interactions live)
+
+**Status:** ✅ Working end-to-end — `tsc --noEmit` clean. Verified in a live guild: `/proposals` lists, `/vote` records to the web app, and `/link` links a wallet via Xaman QR.
+
+### Delivered
+- **Signed interactions endpoint** — `app/api/discord/interactions/route.ts` reads the raw body and verifies Discord's Ed25519 signature (`lib/discord/verify.ts`, `node:crypto` SPKI envelope, no extra deps), then dispatches in-process.
+- **Commands** (`lib/discord/commands.ts` + `lib/discord/interactions.ts`): `/setup` (admin guild→DAO bind), `/link` (Xaman QR scan-to-link + typed-address fallback), `/proposals` (private), `/proposals-public` (channel broadcast, Manage-Messages gated), `/vote` (uses linked wallet).
+- **Scan-to-link via Xaman** — `/link` creates a Xaman SignIn payload (`lib/wallet/xaman-server.ts`), tracks it in `lib/discord/pending-link-repository.ts`, and a webhook (`app/api/wallet/xaman/webhook/route.ts`) re-reads the signed account, checks DAO membership, writes the encrypted identity link, and posts a follow-up confirmation (`lib/discord/rest.ts`). Wallet address never enters a channel.
+- **Registration script** — `scripts/register-discord-commands.ts` (`npm run scripts:discord:register`); instant guild registration via `DISCORD_GUILD_ID`.
+- **Docs** — full setup + command reference added to `README.md` (Discord Bot section).
+
+### Setup notes
+- Requires env: `DISCORD_CLIENT_ID`, `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `APP_PUBLIC_URL` (+ optional `DISCORD_GUILD_ID`).
+- Local testing needs a public HTTPS tunnel (ngrok) set as both the Discord Interactions Endpoint URL and the Xaman Webhook URL.
+
+---
+
+## 2026-06-17 — DAO Launchpad Pivot · Phase A (foundation + Midnight & XRPL)
+
+**Status:** 🟡 In progress — `tsc --noEmit` clean. Funding lifecycle, chain adapters, project API + UI landed; Midnight escrow contract + Discord bot still to come.
+
+### Pivot summary
+VoteChain becomes a **DAO launchpad**: organizations are now born from funded projects. A project raises real on-chain funds into escrow; on hitting the goal it activates — releasing escrow, minting membership, creating the backing Organization, and opening governance. Direct org creation (`POST /api/orgs`) is disabled and returns `ORG_CREATE_DISABLED`.
+
+### Confirmed decisions
+- **Chains (first wave):** Midnight + XRPL/Xahau side-by-side. Cardano trails (Phase C).
+- **Midnight escrow:** new Compact escrow contract (deposit / release / refund / credential mint).
+- **Bot distribution:** hosted multi-tenant via OAuth2 invite link + `/setup` guild binding.
+- **Onboarding:** token/NFT-gated `/link`; privacy = ZK proof of holding (Midnight) + encrypted, never-public Discord↔wallet mapping (all chains).
+
+### Features completed (Phase A)
+- **Chain adapter layer** (`lib/chains/`): `ChainAdapter` interface (`createEscrow`, `getEscrowBalance`, `scanContributions`, `releaseEscrow`, `refundContributor`, `mintMembership`, `verifyHolding`), `registry.ts`, `xrpl-adapter.ts` (real JSON-RPC reads + offline-signed `submit` writes via `xrpl`), `midnight-adapter.ts` (escrow-contract wrapper; best-effort until `MIDNIGHT_ESCROW_ADDRESS` is set).
+- **Launchpad domain** (`lib/launchpad/`): `project-types`, `contribution-types`, JSON repos, `crypto.ts` (AES-256-GCM), `identity-repository.ts` (encrypted Discord↔wallet links), `project-service.ts` (lifecycle + activation bridge into `OrgService`), `membership-mint.ts`.
+- **API**: `GET/POST /api/projects`, `GET /api/projects/[id]`, `POST /api/projects/[id]/status` (open/sync/activate/fail/refund), `GET /api/projects/[id]/contributions`, `GET /api/projects/[id]/contribute`. New error codes `PROJECT_NOT_FOUND` (404), `PROJECT_STATE` (409), `ORG_CREATE_DISABLED` (409).
+- **Governance Live gate**: `proposal-service.activateProposal` blocks activation unless the backing project is `live` (legacy orgs without a project are unaffected).
+- **UI**: `app/projects` (list with funding progress), `app/projects/new` (launch form), `app/projects/[id]` (detail + contribute instructions + creator lifecycle controls). Nav + landing CTA point to the launchpad; `organizations/new` is now a launchpad redirect.
+- **Config/env**: `MIDNIGHT_ESCROW_ADDRESS`, `LAUNCHPAD_ENCRYPTION_KEY`, Discord bot vars added to `.env.example`; `xrpl`/`ripple-keypairs` moved to runtime deps.
+
+### Open (next)
+- Author + compile + deploy the Compact escrow contract; wire `midnight-adapter` writes.
+- Phase B Discord bot (hosted multi-tenant, `/link`, `/setup`, private-vote deep link).
+- E2E script for the funding → activation → governance flow; escrow custody policy (XRPL keys) and encryption-key management.
+
+### Verification
+- `tsc --noEmit`: **passing** (run in WSL).
+
+---
+
 ## 2026-06-15 — Membership Gating + Wallet Connector (post-Phase 2)
 
 **Status:** ✅ Complete — `tsc --noEmit` clean; dev server running in WSL. (No dedicated E2E script yet — see handover open tasks.)

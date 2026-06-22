@@ -4,6 +4,49 @@ Updated at the end of every development session. Everything a new contributor (h
 
 ---
 
+## Session: 2026-06-17 — DAO Launchpad Pivot · Phase A 🟡
+
+### Current State
+- `tsc --noEmit` **clean**. Dev server in WSL at `http://localhost:3000`.
+- VoteChain pivoted to a **DAO launchpad**: orgs are now born from funded projects. Phase A foundation (chain adapters + funding lifecycle + project UI) landed. Midnight escrow contract and the Discord bot are not yet built.
+
+### Architecture (new)
+- **`lib/chains/`** — pluggable per-chain adapter abstraction.
+  - `types.ts` — `ChainAdapter` interface, `EscrowRef`, `SignerAuth`, `MembershipConfig`, errors.
+  - `xrpl-adapter.ts` — XRPL/Xahau. Reads via validated JSON-RPC (`account_info`, `account_tx`); writes built + offline-signed with `xrpl.Wallet` and submitted via the `submit` RPC (no WebSocket). Mints NFTs (`NFTokenMint`) / issued tokens; refunds + release as `Payment`.
+  - `midnight-adapter.ts` — wraps the (pending) Compact escrow contract. Reads return 0/empty (shielded by design); writes throw `AdapterUnsupportedError` until `MIDNIGHT_ESCROW_ADDRESS` is set, treated best-effort upstream.
+  - `registry.ts` — `getChainAdapter(chain)`; launchpad chains = xrpl, xahau, midnight.
+- **`lib/launchpad/`** — funding domain.
+  - `project-types.ts`, `contribution-types.ts`; `project-repository.ts` (`.data/projects.json`), `contribution-repository.ts` (`.data/contributions.json`).
+  - `crypto.ts` — AES-256-GCM (`LAUNCHPAD_ENCRYPTION_KEY`); `identity-repository.ts` — encrypted Discord↔wallet links (`.data/identity-links.json`).
+  - `project-service.ts` — `createProject`, `openFunding`, `syncContributions`, `activate` (release → mint → create org via `orgService` → add members/eligible voters), `fail`, `refund`, `bindGuild`.
+  - `membership-mint.ts` — best-effort mint to each contributor.
+- **`lib/midnight/config.ts`** — added `votechainEscrowConfig`, `DEPLOYED_ADDRESSES.escrow`, `isEscrowContractDeployed()`.
+
+### Last Changes
+- New API: `app/api/projects/route.ts`, `app/api/projects/[id]/{route,status,contributions,contribute}/route.ts`.
+- `lib/domain/schemas.ts` — `createProjectSchema`, `projectActionSchema`, `bindGuildSchema`, `membershipConfigSchema`.
+- `lib/api/respond.ts` — maps `ProjectNotFoundError` (404) + `ProjectStateError` (409).
+- `lib/domain/proposal-service.ts` — Live gate in `activateProposal`.
+- `app/api/orgs/route.ts` — direct POST disabled (`ORG_CREATE_DISABLED`).
+- UI: `app/projects/{page,new/page,[id]/page}.tsx`; `components/nav.tsx` + `app/page.tsx` CTAs; `app/organizations/new/page.tsx` → launchpad redirect.
+- `.env.example` + `package.json` (xrpl/ripple-keypairs → deps).
+
+### Open Tasks (next)
+- **Escrow Compact contract**: author `open_escrow/deposit/release/refund/mint_membership_credential`, compile into `contract/dist/managed/votechain-escrow`, deploy to Preview, set `MIDNIGHT_ESCROW_ADDRESS`, wire `midnight-adapter` writes.
+- **Phase B Discord bot** (`bot/`): hosted multi-tenant, OAuth2 install + `/setup`, `/link` (ZK proof for Midnight, encrypted mapping), proposal/vote commands, private-vote deep link, internal API (`BOT_INTERNAL_SECRET`).
+- **E2E**: draft → fund (XRPL testnet) → activate → org+members → proposal gated until Live.
+- **Decisions to finalize**: XRPL escrow custody (who holds escrow seeds; faucet-funding new escrow accounts on testnet), `LAUNCHPAD_ENCRYPTION_KEY` management/rotation.
+
+### How to run
+```bash
+cd /home/anthony/CascadeProjects/Windsurf-Porject/votechain
+npm run dev        # app: http://localhost:3000  → /projects
+npm run typecheck  # tsc --noEmit
+```
+
+---
+
 ## Session: 2026-06-16 — Phase 5 Confidential Treasury ✅
 
 ### Current State

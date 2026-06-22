@@ -39,14 +39,14 @@ export default function DashboardPage() {
           while preserving privacy — powered by Midnight.
         </p>
         <div className="flex flex-wrap gap-3">
-          <Link href="/organizations/new">
+          <Link href="/projects/new">
             <Button size="lg">
-              Create organization <ArrowRight className="h-4 w-4" />
+              Launch a project <ArrowRight className="h-4 w-4" />
             </Button>
           </Link>
-          <Link href="/organizations">
+          <Link href="/projects">
             <Button size="lg" variant="outline">
-              Browse organizations
+              Browse launchpad
             </Button>
           </Link>
         </div>

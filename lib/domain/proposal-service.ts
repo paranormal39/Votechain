@@ -5,7 +5,14 @@ import {
   onChainCheckProposalResult,
   onChainCreateTreasuryProposal,
   onChainGenerateTreasuryAudit,
+  onChainVoteCommit,
+  onChainVoteCommitDelegated,
+  onChainVoteReveal,
+  onChainDelegate,
+  deriveWalletSecretHex,
+  deriveVoterPubKeyForAddress,
 } from '../midnight/client';
+import type { VoteChoice } from './proposal-types';
 import { orgRepository, OrgNotFoundError, type OrgRepository } from './repository';
 import {
   proposalRepository,
@@ -14,6 +21,7 @@ import {
 } from './proposal-repository';
 import { delegationService, type DelegationService } from './delegation-service';
 import { treasuryService, type TreasuryService } from './treasury-service';
+import { projectRepository } from '../launchpad/project-repository';
 import {
   resolveOutcome,
   type AddCommentInput,
@@ -28,6 +36,11 @@ export class ProposalStateError extends Error {
     super(message);
     this.name = 'ProposalStateError';
   }
+}
+
+/** Map a public vote choice to the on-chain ballot encoding (0=NO, 1=YES, 2=ABSTAIN). */
+function ballotFor(choice: Exclude<VoteChoice, 'private'>): 0 | 1 | 2 {
+  return choice === 'yes' ? 1 : choice === 'no' ? 0 : 2;
 }
 
 /**
@@ -74,6 +87,16 @@ export class ProposalService {
       );
     }
 
+    // Launchpad gate: if the org was created by a launchpad project, governance
+    // only opens once that project has reached its funding goal and gone Live.
+    // Orgs with no backing project (legacy / direct) are unaffected.
+    const backingProject = await projectRepository.getByOrgId(proposal.orgId).catch(() => null);
+    if (backingProject && backingProject.status !== 'live') {
+      throw new ProposalStateError(
+        `Governance is locked until the funding goal is met (project status: ${backingProject.status})`
+      );
+    }
+
     const now = new Date();
     const endsAt = new Date(now.getTime() + proposal.votingPeriodDays * 24 * 60 * 60 * 1000);
 
@@ -110,6 +133,7 @@ export class ProposalService {
     metaHash.set(idBytes.subarray(0, Math.min(32, idBytes.length)));
     const commitBlocks = BigInt(proposal.votingPeriodDays * 720); // ~1 block/2min
     const revealBlocks = 50n;
+    let onChainCreated = false;
     try {
       if (proposal.type === 'treasury') {
         await onChainCreateTreasuryProposal(
@@ -119,8 +143,32 @@ export class ProposalService {
         await onChainCreateProposal(onChainId, metaHash, commitBlocks, revealBlocks, proposal.quorum);
       }
       await this.proposals.update(id, (p) => ({ ...p, onChainProposalId: Number(onChainId) }));
+      onChainCreated = true;
     } catch (err) {
       this.warn('onChainCreateProposal', id, err);
+    }
+
+    // Best-effort: register the org's standing delegations on-chain for this
+    // proposal so delegated voting power resolves during the commit phase.
+    if (onChainCreated) {
+      try {
+        const delegations = (await this.delegations.listDelegations(proposal.orgId)).filter(
+          (d) => d.active
+        );
+        for (const d of delegations) {
+          try {
+            await onChainDelegate(
+              onChainId,
+              deriveWalletSecretHex(d.delegatorAddress),
+              deriveVoterPubKeyForAddress(d.delegateAddress)
+            );
+          } catch (err) {
+            this.warn('onChainDelegate', `${id}:${d.delegatorAddress}`, err);
+          }
+        }
+      } catch (err) {
+        this.warn('onChainDelegate', id, err);
+      }
     }
 
     return updated;
@@ -141,10 +189,20 @@ export class ProposalService {
       finalizedAt: new Date().toISOString(),
     }));
 
-    // Best-effort: finalize on-chain.
+    // Best-effort: reveal each committed public vote, then finalize on-chain.
+    // Private (ZK) votes have no server-side choice and are skipped.
     if (proposal.onChainProposalId != null) {
+      const onChainId = BigInt(proposal.onChainProposalId);
+      for (const vote of proposal.votes) {
+        if (vote.choice === 'private') continue;
+        try {
+          await onChainVoteReveal(onChainId, deriveWalletSecretHex(vote.walletAddress));
+        } catch (err) {
+          this.warn('onChainVoteReveal', `${id}:${vote.walletAddress}`, err);
+        }
+      }
       try {
-        await onChainCheckProposalResult(BigInt(proposal.onChainProposalId));
+        await onChainCheckProposalResult(onChainId);
       } catch (err) {
         this.warn('onChainCheckProposalResult', id, err);
       }
@@ -205,6 +263,24 @@ export class ProposalService {
         receipt = res.data?.txHash;
       } catch (err) {
         this.warn('castVote', id, err);
+      }
+    }
+
+    // Best-effort: commit the vote on-chain in the Voting contract. When the
+    // voter carries delegated weight, route through the Delegation contract's
+    // vote_commit_delegated circuit so delegators' power is bundled in.
+    if (proposal.onChainProposalId != null) {
+      const onChainId = BigInt(proposal.onChainProposalId);
+      const ballot = ballotFor(input.choice);
+      const voterSecret = deriveWalletSecretHex(input.walletAddress);
+      try {
+        if (weight > 1) {
+          await onChainVoteCommitDelegated(onChainId, voterSecret, ballot);
+        } else {
+          await onChainVoteCommit(onChainId, voterSecret, ballot);
+        }
+      } catch (err) {
+        this.warn('onChainVoteCommit', id, err);
       }
     }
 

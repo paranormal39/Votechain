@@ -148,6 +148,17 @@ export const revokeDelegationSchema = z.object({
 export type DelegateBody = z.infer<typeof delegateSchema>;
 export type RevokeDelegationBody = z.infer<typeof revokeDelegationSchema>;
 
+// ---- Feedback (Phase 6) ----
+
+export const submitFeedbackSchema = z.object({
+  walletAddress: z.string().min(4, 'A valid wallet address is required'),
+  body: z.string().min(1, 'Feedback cannot be empty').max(2000),
+  /** Optional reporting period (e.g. "2026-Q1"); defaults to the current month. */
+  period: z.string().min(1).max(40).optional(),
+});
+
+export type SubmitFeedbackBody = z.infer<typeof submitFeedbackSchema>;
+
 // ---- Treasury (Phase 5) ----
 
 const amountSchema = z
@@ -187,3 +198,43 @@ export type DepositBody = z.infer<typeof depositSchema>;
 export type CreateSpendRequestBody = z.infer<typeof createSpendRequestSchema>;
 export type ExecuteSpendBody = z.infer<typeof executeSpendSchema>;
 export type LinkProposalBody = z.infer<typeof linkProposalSchema>;
+
+// ---- Launchpad projects (pivot) ----
+
+// Launchpad funding currently supports XRPL/Xahau + Midnight; Cardano trails.
+export const launchpadChainSchema = z.enum(['midnight', 'xrpl', 'xahau']);
+
+export const membershipConfigSchema = z.object({
+  kind: z.enum(['token', 'nft', 'credential']),
+  name: z.string().min(2, 'Membership name is required').max(80),
+  currency: z.string().max(40).optional(),
+  amountPerContributor: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'Amount must be a non-negative number')
+    .optional(),
+  taxon: z.number().int().min(0).optional(),
+});
+
+export const createProjectSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').max(80),
+  description: z.string().max(1000).optional(),
+  chain: launchpadChainSchema,
+  createdBy: z.string().min(4, 'A valid wallet address is required'),
+  goalAmount: z.string().regex(/^\d+(\.\d+)?$/, 'Goal must be a positive number'),
+  currency: z.string().min(1).max(40),
+  deadline: z.string().datetime({ message: 'Deadline must be an ISO datetime' }),
+  membership: membershipConfigSchema,
+});
+
+export const projectActionSchema = z.object({
+  action: z.enum(['open', 'sync', 'activate', 'fail', 'refund']),
+});
+
+export const bindGuildSchema = z.object({
+  guildId: z.string().min(2, 'A valid Discord guild id is required'),
+});
+
+export type MembershipConfigBody = z.infer<typeof membershipConfigSchema>;
+export type CreateProjectBody = z.infer<typeof createProjectSchema>;
+export type ProjectActionBody = z.infer<typeof projectActionSchema>;
+export type BindGuildBody = z.infer<typeof bindGuildSchema>;

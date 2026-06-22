@@ -10,6 +10,36 @@ VoteChain focuses on confidentiality with verifiable outcomes.
 
 ---
 
+## DAO Launchpad Pivot (current direction)
+
+VoteChain is now a **DAO launchpad**: an organization is no longer created directly — it is **born from a funded project**. Every project must clear a real on-chain funding-escrow goal before its DAO activates, mints membership to contributors, and opens governance. A hosted, multi-tenant Discord bot is the primary surface for existing communities to privately gate access, view proposals, and vote.
+
+**New core lifecycle:**
+
+```
+Draft → Funding (escrow open) → [goal hit] → Activating → Live
+                              → [deadline missed] → Failed → Refunding → Refunded
+```
+
+On **goal hit**: release escrow to the treasury → mint membership (token / NFT / Midnight credential) → create the backing Organization (existing governance stack) → register contributors as members + eligible voters → open governance + bind the Discord bot.
+
+**Confirmed decisions:**
+
+- **Chains (first wave):** Midnight + XRPL/Xahau side-by-side (Xaman for XRPL/Xahau, Lace for Midnight/NIGHT). Cardano trails.
+- **Midnight escrow:** a new Compact escrow contract (deposit / release / refund / `mint_membership_credential`).
+- **Bot distribution:** hosted multi-tenant; communities add it via an OAuth2 invite link and bind a guild with `/setup`.
+- **Onboarding existing members:** token/NFT-gated. Members must `/link` a wallet to access the bot. Privacy = both: Midnight ZK proof of holding (bot learns only valid/invalid) **and** an encrypted, never-public Discord↔wallet mapping for all chains.
+
+**Launchpad phases:**
+
+- **Phase A — Funding foundation + Midnight & XRPL/Xahau (in progress):** `lib/chains/` adapter abstraction + registry, `xrpl-adapter` (escrow account, contribution watch, mint, refund), `midnight-adapter` (escrow contract wrapper, graceful until deployed), `lib/launchpad/` (projects, contributions, encrypted identity links, project-service + activation bridge), project API routes + `app/projects/*` UI, and the governance Live gate.
+- **Phase B — Discord bot (hosted multi-tenant):** treasury-tier-unlocked OAuth2 install + `/setup` guild binding, signature-verified `/link` private gated access (ZK proof for Midnight, encrypted mapping), proposal/vote commands with re-verify-on-action, private-vote deep link. **Full spec, tier table, command list, and B0–B5 build order: see [Phase B — Discord Bot](#phase-b--discord-bot-hosted-multi-tenant) below.**
+- **Phase C — Cardano adapter.**
+
+The Phases 1–8 below describe the **post-activation governance layer** that a Live project's Organization operates on. They remain accurate for everything after activation; the launchpad simply gates entry into them.
+
+---
+
 ## Core Problem
 
 Organizations need governance.
@@ -387,6 +417,82 @@ This is why each user must run their own proof server. AgilityCore's `MIDNIGHT_P
 **Deliverable:** Organizations can collect honest member feedback without fear of attribution.
 
 > **Demo moment:** "I shared real concerns about the proposal process. The admin saw the pattern. Nobody knows it was me."
+
+---
+
+## Phase B — Discord Bot (hosted multi-tenant)
+
+**Goal:** Let a Live DAO bring governance into its existing Discord community — privately gate access by on-chain credential, list proposals, and vote — without exposing any member's wallet.
+
+### Architecture (decided)
+- **HTTP-interactions, not a gateway bot.** Discord slash commands POST to a Next.js route (`app/api/discord/interactions/route.ts`); requests are Ed25519-verified and handled in-process, reusing `lib/launchpad` + `lib/chains` + `lib/membership` services directly. Side effects (role grant/revoke, DMs) use the Discord REST API via the bot token — no persistent gateway connection. A standalone `bot/` gateway worker can be added later for event-driven features (auto-DM on join, live announcements).
+- **Privacy preserved:** the Discord↔wallet mapping stays AES-GCM encrypted at rest (`lib/launchpad/identity-repository.ts`) and is never echoed into a channel. Private votes only ever emit a deep link — the choice is committed in-browser per the Phase 3 principle.
+
+### Treasury-tier unlock
+The bot is gated behind the DAO's treasury balance. Once a tier threshold is met, the project detail page (`app/projects/[id]`) reveals an **"Invite Bot"** OAuth2 install link bound to that project. Higher tiers unlock more bot surface.
+
+| Tier | Name | Test threshold | Bot capability |
+|---|---|---|---|
+| 1 | Basic | `1` | Invite bot · `/proposals` · `/vote` |
+| 2 | Second | `5` | + announcements, `/treasury` read |
+| 3 | High | `10` | + delegation commands, analytics |
+| 4 | Enterprise | `20` | + private feedback, audit export |
+
+> Test values only — replace with production thresholds (and pin the currency) before launch.
+
+### Auth model (two layers)
+- **Bot ↔ VoteChain (service):** internal endpoints authenticated with `BOT_INTERNAL_SECRET` (only needed once a standalone gateway worker is added; in-process interactions call services directly).
+- **Discord user ↔ wallet (identity):** `/link` issues an ephemeral, short-TTL deep link to a web verify page carrying `guildId` + `discordUserId`. The user **connects + signs a nonce** (Xaman for XRPL/Xahau; Lace + ZK proof for Midnight) to prove wallet control before the encrypted link is written and the role is granted. A Discord id alone never grants access.
+
+### Credential verification
+- **Re-verify on every gated action.** Before each `/vote` / `/proposals`, the bot re-runs `ChainAdapter.verifyHolding(...)` against the live chain (with a short ~60–120s per-wallet TTL cache to avoid RPC hammering). If holdings have dropped, the action is denied and the Discord role is revoked.
+- **Default scope:** the DAO's own membership asset minted on activation (XRPL/Xahau NFT/token implemented; Midnight via client-side ZK proof of holding; Cardano trails). Arbitrary external token/NFT gates can later reuse `lib/membership/verify.ts`.
+
+### Commands
+
+**Setup & identity**
+- `/setup` — admin-only; bind this guild to the unlocked project/DAO, configure the verified-member role. *(B2)*
+- `/link` — start wallet linking; deep link → web verify page → wallet signature → encrypted link + role grant. *(B3)*
+- `/unlink` — remove the encrypted Discord↔wallet link and strip the role. *(B3)*
+- `/whoami` — ephemeral; show link status + chain (never the address). *(B3)*
+
+**Governance reads**
+- `/proposals` — list active proposals with status + quorum progress (re-verifies first). *(B4)*
+- `/proposal <id>` — detail: description, tally bars, voting deadline. *(B4)*
+- `/status` — DAO snapshot: treasury tier, member count, open proposals. *(B4)*
+
+**Voting**
+- `/vote <id> <yes|no|abstain>` — public vote inline (re-verify before accepting). *(B5)*
+- `/vote-private <id>` — deep link to the ZK voting UI; choice never touches Discord. *(B5)*
+
+**Tier 2+ (later)**
+- `/treasury` — balance + privacy-mode badge. *(Tier 2)*
+- `/delegate <@user>` / `/revoke-delegation` — delegation via the Phase 4 stack. *(Tier 3)*
+- `/feedback` — anonymous ZK feedback deep link (Phase 8). *(Tier 4)*
+- `/audit <id>` — governance proof receipt link (Phase 6). *(Tier 4)*
+
+**Admin / ops**
+- `/announce` — push a proposal opening/closing notice to a configured channel. *(Tier 2)*
+- `/sync` — admin; force a holdings re-check across linked members. *(B4)*
+
+### Build order
+- **B0 — Tier gate:** `botUnlocked(project)` helper + gated "Invite Bot" button on `app/projects/[id]`.
+- **B1 — Interactions plumbing:** `app/api/discord/interactions/route.ts`, Ed25519 verification, command registration.
+- **B2 — `/setup`:** OAuth2 install → `bindGuild` (guild ↔ project) + member-role config.
+- **B3 — `/link` / `/unlink` / `/whoami`:** signature-verified linking, encrypted mapping, role grant.
+- **B4 — Gated reads:** `/proposals`, `/proposal`, `/status`, `/sync` with re-verify + TTL cache.
+- **B5 — Voting:** `/vote` (public inline), `/vote-private` (deep link).
+
+### Acceptance criteria
+- [ ] Bot install link appears only after the DAO's treasury clears the tier threshold.
+- [ ] `/setup` binds exactly one guild to one project; non-admins are rejected.
+- [ ] `/link` requires a valid wallet signature; the wallet address is never posted to a channel and is stored encrypted at rest.
+- [ ] Every gated command re-verifies on-chain holdings; a member who no longer holds the asset is denied and de-roled.
+- [ ] Private voting from Discord only ever produces a deep link; the vote choice never appears in any Discord payload, bot log, or internal request.
+
+**Deliverable:** Existing communities can privately gate access and govern from Discord, with the bot unlocked by treasury tier.
+
+> **Demo moment:** "Our DAO hit its treasury tier, we dropped the bot into Discord, and members vote privately right from their server."
 
 ---
 

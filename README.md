@@ -76,8 +76,15 @@ npm run dev
 | `MIDNIGHT_PROOF_SERVER_URL` | Optional | Override proof server URL (auto-detected from Midnight Lace wallet) |
 | `XAMAN_API_KEY` | Optional | Xaman (XUMM) app key — from [apps.xaman.dev](https://apps.xaman.dev) |
 | `XAMAN_API_SECRET` | Optional | Xaman app secret — from [apps.xaman.dev](https://apps.xaman.dev) |
+| `DISCORD_CLIENT_ID` | Bot | Discord application (client) id |
+| `DISCORD_BOT_TOKEN` | Bot | Discord bot token |
+| `DISCORD_PUBLIC_KEY` | Bot | Application public key — verifies inbound interaction signatures |
+| `DISCORD_GUILD_ID` | Optional | Register slash commands instantly to one test guild (else global) |
+| `APP_PUBLIC_URL` | Bot | Public HTTPS base URL the bot deep-links to (same host as the interactions endpoint) |
 
 > `XAMAN_API_KEY` and `XAMAN_API_SECRET` are only needed if you want Xaman/XUMM wallet support. All other wallets work without them.
+>
+> The `DISCORD_*` / `APP_PUBLIC_URL` vars are only needed to run the Discord bot — see **[Discord Bot](#discord-bot)** below.
 
 ---
 
@@ -170,6 +177,68 @@ Each org has a treasury with a governance-gated spend flow:
 Privacy modes:
 - `public` — amount visible on-chain (fully operational).
 - `hybrid` / `private` — amount ZK-committed; enforcement via Compact contract (Phase 5 ZK upgrade).
+
+---
+
+## Discord Bot
+
+A hosted, multi-tenant Discord bot lets a Live DAO bring governance into its community — privately link wallets, browse proposals, and vote — without ever exposing a member's wallet address. The bot is **HTTP-interactions based** (no gateway worker): Discord POSTs signed slash-command interactions to `/api/discord/interactions`, which verifies the Ed25519 signature and dispatches in-process.
+
+### Commands
+
+| Command | Who | Visibility | What it does |
+|---|---|---|---|
+| `/setup project_id:<id>` | Admins | Private | Binds this server (guild) to a Live VoteChain DAO. |
+| `/link` | Members | Private | Shows a **Xaman QR** to sign in; proves wallet ownership and stores an encrypted Discord↔wallet link. |
+| `/link wallet:<addr>` | Members | Private | Fallback: link by pasting an address (no ownership proof). |
+| `/proposals` | Members | Private | Lists active proposals with live tallies (ephemeral). |
+| `/proposals-public` | Moderators¹ | **Public** | Posts active proposals to the channel for all members to see. |
+| `/vote proposal_id:<id> choice:<yes\|no\|abstain>` | Linked members | Private | Casts a vote using the caller's linked wallet. |
+
+¹ Gated by the **Manage Messages** permission to prevent channel spam.
+
+### Scan-to-link flow (`/link`)
+
+Linking proves wallet ownership via a Xaman signature and is finalized asynchronously by a webhook:
+
+```
+/link ──> create Xaman SignIn payload (custom_meta carries guild + discord user)
+      ──> store pending { payloadUuid -> guild, discordUser, interactionToken }
+      ──> reply with QR embed + "Open in Xaman" deep link
+User scans + signs in Xaman
+Xaman ──> POST /api/wallet/xaman/webhook
+      ──> re-fetch payload from Xaman (authoritative) -> verified account
+      ──> confirm account is a DAO member
+      ──> write encrypted identity link (lib/launchpad/identity-repository.ts)
+      ──> follow-up message in Discord: "Wallet linked!"
+```
+
+The wallet address is **never posted to a channel**, is stored AES-GCM encrypted at rest, and a spoofed webhook cannot forge a link because the signed account is always re-read from Xaman.
+
+### Local setup
+
+Discord must reach your server over public HTTPS, so use a tunnel (e.g. `ngrok http 3000`) in front of `npm run dev`.
+
+1. **Env** (`.env`): set `DISCORD_CLIENT_ID`, `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `APP_PUBLIC_URL=<your tunnel URL>`, and optionally `DISCORD_GUILD_ID` (your test server id for instant command registration). Restart `npm run dev` after editing.
+2. **Register commands**: `npm run scripts:discord:register` (instant for a guild if `DISCORD_GUILD_ID` is set, else global ~1h).
+3. **Interactions endpoint**: in the [Discord Developer Portal](https://discord.com/developers/applications) → *General Information* → **Interactions Endpoint URL** = `https://<tunnel>/api/discord/interactions`, then Save (Discord sends a signed PING the endpoint must answer).
+4. **Xaman webhook** (for `/link`): in [apps.xaman.dev](https://apps.xaman.dev) → your app → **Webhook URL** = `https://<tunnel>/api/wallet/xaman/webhook`.
+
+> **ngrok free URLs change on every restart.** If the tunnel restarts, update both the Discord Interactions Endpoint URL and the Xaman Webhook URL (and `APP_PUBLIC_URL`) to the new URL.
+
+### Files
+
+```
+app/api/discord/interactions/route.ts   ← signed interactions endpoint (Ed25519 verify)
+app/api/wallet/xaman/webhook/route.ts    ← Xaman webhook → finalizes /link
+lib/discord/verify.ts                     ← Ed25519 signature verification (node:crypto)
+lib/discord/commands.ts                   ← slash-command definitions (pure data)
+lib/discord/interactions.ts               ← command handlers
+lib/discord/pending-link-repository.ts    ← in-flight scan-to-link sessions
+lib/discord/rest.ts                       ← interaction follow-up helper
+lib/wallet/xaman-server.ts                ← server-side Xaman payload create/read
+scripts/register-discord-commands.ts      ← bulk command registration (npm run scripts:discord:register)
+```
 
 ---
 

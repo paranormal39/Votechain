@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 
 const links = [
   { href: '/', label: 'Dashboard' },
+  { href: '/projects', label: 'Launchpad' },
   { href: '/organizations', label: 'Organizations' },
 ];
 

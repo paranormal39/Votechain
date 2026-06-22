@@ -31,7 +31,9 @@ function loadConfig(): Config {
       url: process.env.DATABASE_URL,
     },
     chains: {
-      xrplRpcUrl: process.env.XRPL_RPC_URL || 'https://s.altnet.rippletest.net:51234/',
+      // Default to a port-443 testnet node; the classic :51234 endpoint is
+      // blocked on many networks (incl. some WSL setups) and times out.
+      xrplRpcUrl: process.env.XRPL_RPC_URL || 'https://testnet.xrpl-labs.com/',
       xahauRpcUrl: process.env.XAHAU_RPC_URL || 'https://xahau-test.net/',
     },
   };
